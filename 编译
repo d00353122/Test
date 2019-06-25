@@ -1,0 +1,471 @@
+https://blog.csdn.net/XiaZhanglong/article/details/49407897
+
+1.前言
+     一直对linux内核很感兴趣，读书的时候也看过赵炯博士写的linux-0.11内核分析，但是当时只是匆匆看了一遍，时至今日已经忘的差不多了。最近有时间准备再看一遍linux内核，之所以没有选择再看linux-0.11的内核是因为它不支持网络，而自己对网络部分的代码也很感兴趣，所以就选择了linux 1.2.13版本的内核。看内核的时候当然便调试便看代码理解起来更加方便，所以首要任务就要使代码能编译和调试。
+     编译之前先到https://www.kernel.org/pub/linux/kernel/下载linux 1.2.13的源代码。
+     编译环境：
+     linux版本：xubuntu-12.04
+     GCC版本：GCC-4.6.3
+2.编译
+     编译linux1.2.13的代码需要make三次，第一次make生成配置文件，第二次生成依赖文件，第三次才是真正的生成二进制文件。
+   （1）make生成.config和include/linux/autoconfig.h这两个文件。make的时候会出现一个选择配置菜单，按照默认选项选择就可以了，这一步一般不会出现问题。
+zhaxia@zhaxia:~/work/linux-1.2.13$ make
+rm -f include/asm
+( cd include ; ln -sf asm-i386 asm)
+/bin/bash Configure arch/i386/config.in
+*
+* General setup
+*
+Kernel math emulation (CONFIG_MATH_EMULATION) [n] n
+Normal floppy disk support (CONFIG_BLK_DEV_FD) [y] y
+Normal (MFM/RLL) disk and IDE disk/cdrom support (CONFIG_ST506) [y] y
+*
+* Please see drivers/block/README.ide for help/info on IDE drives
+*
+   Use old disk-only driver for primary i/f (CONFIG_BLK_DEV_HD) [n] n
+   Use new IDE driver for primary/secondary i/f (CONFIG_BLK_DEV_IDE) [y] y
+   Include support for IDE/ATAPI CDROMs (CONFIG_BLK_DEV_IDECD) [n] n
+XT harddisk support (CONFIG_BLK_DEV_XD) [n] n
+Networking support (CONFIG_NET) [y] y
+Limit memory to low 16MB (CONFIG_MAX_16M) [n] n
+PCI bios support (CONFIG_PCI) [n] n
+System V IPC (CONFIG_SYSVIPC) [y] y
+Kernel support for ELF binaries (CONFIG_BINFMT_ELF) [y] y
+Use -m486 flag for 486-specific optimizations (CONFIG_M486) [y] y
+...
+     (2)第二次make生成.depend文件，这一步出现一个头文件找不到的问题
+...
+gcc -D__KERNEL__ -I/home/zhaxia/work/linux-1.2.13/include -E -M -DMODULE aztcd.c sbpcd.c sonycd535.c >> .depend
+aztcd.c:138:47: fatal error: /usr/src/linux/drivers/block/blk.h: No such file or directory
+compilation terminated.
+...
+      解决方法：将drivers/block/aztcd.c中138行的文件绝对路径"/usr/src/linux/drivers/block/blk.h"更改成相对路径"blk.h"。
+     (3)第三次make生成二进制文件.
+zhaxia@zhaxia:~/work/linux-1.2.13$ make
+rm -f include/linux/version.h
+gcc -D__KERNEL__ -I/home/zhaxia/work/linux-1.2.13/include -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -pipe -m486  -c -o init/main.o init/main.c
+cc1: error: unrecognized command line option ‘-m486’
+make: *** [init/main.o] Error 1
+    解决方法：将arch/i386/Makefile中的31行改成CFLAGS := $(CFLAGS) -march=i486。
+    (4)继续make
+<span style="font-size:12px;">zhaxia@zhaxia:~/work/linux-1.2.13$ make
+…
+/home/zhaxia/work/linux-1.2.13/include/asm/bitops.h: In function ‘find_first_zero_bit’:
+/home/zhaxia/work/linux-1.2.13/include/asm/bitops.h:75:10: warning: missing terminating " character [enabled by default]
+/home/zhaxia/work/linux-1.2.13/include/asm/bitops.h:75:2: error: missing terminating " character
+…
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h: In function ‘memscan’:
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:540:10: warning: missing terminating " character [enabled by default]
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:540:2: error: missing terminating " character
+…
+init/main.c:73:8: warning: extra tokens at end of #endif directive [enabled by default]
+init/main.c:76:8: warning: extra tokens at end of #endif directive [enabled by default]
+init/main.c:79:8: warning: extra tokens at end of #endif directive [enabled by default]
+…</span>
+     bitops.h和string.h中的错误都是由于C语言嵌入汇编时一个“”包含了多行汇编语句导致的，要解决很简单，每一行汇编语句用 一个“”并在每一行的汇编最后加上\n\t。main.c中的警告是因为在#endif后面跟了一个宏，只要删掉 每一个#endif后面的宏就可以了。
+     bitops.h中的汇编错误语句改成下面的格式就可以了，以后有类似的错误都这样改。
+ 69 extern inline int find_first_zero_bit(void * addr, unsigned size)
+ 70 {
+ 71     int res;
+ 72 
+ 73     if (!size)
+ 74         return 0;
+ 75     __asm__(
+ 76         "cld\n\t"
+ 77         "movl $-1,%%eax\n\t"
+ 78         "repe; scasl\n\t"
+ 79         "je 1f\n\t"
+ 80         "subl $4,%%edi\n\t"
+ 81         "movl (%%edi),%%eax\n\t"
+ 82         "notl %%eax\n\t"
+ 83         "bsfl %%eax,%%edx\n\t"
+ 84         "jmp 2f\n\t"
+ 85 "1:     xorl %%edx,%%edx\n\t"
+ 86 "2:     subl %%ebx,%%edi\n\t"
+ 87         "shll $3,%%edi\n\t"
+ 88         "addl %%edi,%%edx\n\t"
+ 89         :"=d" (res)
+ 90         :"c" ((size + 31) >> 5), "D" (addr), "b" (addr)
+ 91         :"ax", "bx", "cx", "di");
+ 92     return res;
+ 93 }
+     (5)继续make
+...
+/home/zhaxia/work/linux-1.2.13/include/asm/unistd.h:113:15: warning: conflicting types for built-in function ‘_exit’ [enabled by default]
+init/main.c: In function ‘get_options’:
+init/main.c:120:2: warning: array subscript has type ‘char’ [-Wchar-subscripts]
+init/main.c: In function ‘start_kernel’:
+init/main.c:390:2: warning: format not a string literal and no format arguments [-Wformat-security]
+init/main.c: In function ‘get_options’:
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:128:1: error: can’t find a register in class ‘SIREG’ while reloading ‘asm’
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:128:1: error: ‘asm’ operand has impossible constraints
+make: *** [init/main.o] Error 1
+    解决方法：
+    <5.1>unistd.h 113行警告:这是由于113定义的int _exit(int exitcode)函数与内置的void _exit(int exitcode)函数定义不一样导致的。更改时可以重新定义一个无返回值的宏，删去原来定义_exit的宏然后用这个无返回值的宏再定义_exit函数。
+ ...
+ 31 #define _syscall_exit(type,name,type1,arg1) \
+ 32 type name(type1 arg1) \  
+ 33 { \
+ 34 long __res; \
+ 35 __asm__ volatile ("int $0x80" \
+ 36     : "=a" (__res) \
+ 37     : "0" (__NR_##name),"b" ((long)(arg1))); \ 
+ 38 }
+...
+ 123 static inline _syscall_exit(void,_exit,int,exitcode)
+   <5.2>man.c 120行的警告:这是由于传入参数不匹配导致，将isdigit()的参数强制转换成int即可。
+120     while (cur && isdigit((int)*cur) && i <= 10)
+   <5.3>main.c 390行的警告:这也是由于传入参数有问题导致。
+390     printk("%s", linux_banner); 
+   <5.4>string.h 128行的两个错误:这两个错误都是由于C嵌入汇编用法不对造成的，后续make的时候还会遇到非常多的相同的错误，更改方法都一样。选了两个比较有代表性的函数更改如下，左边是原始代码，右边是更改后的代码。更改的方式是list of clobbered regester部分全部改成"memory"，output regester部分根据input regesters 部分更改,比如输入为"X"(m)"则在output部分添加"=&X" (di)，同时在函数开始定义di。然后再将input regesters部分中的X改为其对应的output registers部分的序号就可以了。遇到这种错误还可以参考linux 2.5.0的代码，对比两者就知道怎么改了。
+  
+    (6)继续make
+...
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:107:1: error: can’t find a register in class ‘CREG’ while reloading ‘asm’
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:107:1: error: can’t find a register in class ‘CREG’ while reloading ‘asm’
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:271:1: error: can’t find a register in class ‘DIREG’ while reloading ‘asm’
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:107:1: error: can’t find a register in class ‘CREG’ while reloading ‘asm’
+...
+      解决方法：这次make出现很多的5.4一样的错误，按照5.4的方法把include/asm/string.h, include/asm/bitopts.h,  include/asm/delay.h, include/asm/segment.h中所有类似的所有C嵌入汇编都更改过来。
+      (7)更改完(6)中所列的所有文件之后继续make
+…
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:105: Warning: using `%al' instead of `%eax' due to `b' suffix
+/home/zhaxia/work/linux-1.2.13/include/asm/string.h:105: Warning: using `%al' instead of `%eax' due to `b' suffix
+…
+ksyms.c:87:2: warning: excess elements in array initializer [enabled by default]
+ksyms.c:87:2: warning: (near initialization for ‘symbol_table.symbol’) [enabled by default]
+ksyms.c:88:2: warning: excess elements in array initializer [enabled by default]
+ksyms.c:88:2: warning: (near initialization for ‘symbol_table.symbol’) [enabled by default]
+ksyms.c:93:2: warning: excess elements in array initializer [enabled by default]
+ksyms.c:93:2: warning: (near initialization for ‘symbol_table.symbol’) [enabled by default]
+ksyms.c:99:2: warning: excess elements in array initializer [enabled by default]
+ksyms.c:99:2: warning: (near initialization for ‘symbol_table.symbol’) [enabled by default]
+ksyms.c:117:2: warning: excess elements in array initializer [enabled by default]
+ksyms.c:117:2: warning: (near initialization for ‘symbol_table.symbol’) [enabled by default]
+ksyms.c:118:2: warning: excess elements in array initializer [enabled by default]
+ksyms.c:118:2: warning: (near initialization for ‘symbol_table.symbol’) [enabled by default]
+…
+/home/zhaxia/work/linux-1.2.13/include/linux/symtab_end.h:12:3: warning: excess elements in array initializer [enabled by default]
+/home/zhaxia/work/linux-1.2.13/include/linux/symtab_end.h:12:3: warning: (near initialization for ‘symbol_table.symbol’) [enabled by default]
+/home/zhaxia/work/linux-1.2.13/include/linux/symtab_end.h:15:34: warning: excess elements in array initializer [enabled by default]
+…
+sched.c:43:25: error: conflicting type qualifiers for ‘xtime’
+/home/zhaxia/work/linux-1.2.13/include/linux/sched.h:258:23: note: previous declaration of ‘xtime’ was here
+sched.c: In function ‘do_timer’:
+sched.c:594:5: warning: suggest explicit braces to avoid ambiguous ‘else’ [-Wparentheses]
+sched.c: In function ‘show_task’:
+sched.c:740:3: warning: format not a string literal and no format arguments [-Wformat-security]
+…
+    解决方法:
+    <7.1> string.h 105行的报警是因为106行的汇编代码用字节操作符去操作32bit操作数导致。更改方法将string.h106行改成如下即可：
+106     "orb $1,%%al\n"
+    <7.2>ksyms.c中的报警和symtab_end.h中的错误都是因为数组越界导致，只要将include/linux/module.h中的56，57行的数组大小由0改为400即可。
+56     struct internal_symbol symbol[400];
+57     struct module_ref ref[400];
+    <7.3>sched.c 43行中的错误是由于include/linux/sched.h文件中声明的xtime变量定义不一致导致的，只需将sched.h中的xtime的定义改成与sched.c中定义的变量一致就行。
+258 extern volatile struct timeval xtime;
+    <7.4>sched.c 594行的警告是因为if后面没有跟大括号，更改时只需要跟一对大括号即可。
+594     if (time_status != TIME_BAD && xtime.tv_sec > last_rtc_update + 660 &&
+595         xtime.tv_usec > 500000 - (tick >> 1) &&
+596         xtime.tv_usec < 500000 + (tick >> 1)){
+597       if (set_rtc_mmss(xtime.tv_sec) == 0) 
+598         last_rtc_update = xtime.tv_sec;
+599       else
+600         last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
+601     }
+    <7.5>sched.c 740 行中的警告是因为printk的输入参数错误导致，改成如下即可。
+740         printk("%s",stat_nam[p->state]);
+    (8)继续make
+sched.c: In function ‘schedule’:
+sched.c:194:2: error: can’t find a register in class ‘CREG’ while reloading ‘asm’
+sched.c:194:2: error: ‘asm’ operand has impossible constraints
+make[1]: *** [sched.o] Error 1
+    解决方法：与5.4类似。
+ 59     : /* no output */ \
+ 60     :"m" (*(((char *)&tsk->tss.tr)-4)), \
+ 61      "c" (tsk)); \
+ 62     /* Now maybe reload the debug registers */ \
+ 63     if(current->debugreg[7]){ \
+    (9)继续make，这次出现了很多的警告，暂时不管，只处理错误和最后几个警告。
+exec.c: In function ‘copy_strings’:
+exec.c:422:44: error: lvalue required as left operand of assignment
+exec.c: In function ‘setup_arg_pages’:
+exec.c:439:16: warning: variable ‘code_limit’ set but not used [-Wunused-but-set-variable]
+exec.c: In function ‘load_aout_binary’:
+exec.c:746:17: warning: dereferencing type-punned pointer will break strict-aliasing rules [-Wstrict-aliasing]
+    解决方法:
+    <9.1> exec.c 422行错误是由于C语言的过时用法导致，只需按照现在的语法重写一遍即可，改成如下所示。
+421                 if (!pag) {
+422                   page[p/PAGE_SIZE] =
+423                           (unsigned long) get_free_page(GFP_USER);
+424                   pag = (char*) get_free_page(GFP_USER);
+425                   if (!pag)
+426                     return 0;
+427                 }
+     <9.2>exec.c 439行的警告是由于定义了变量但是未使用造成，只需将code_limit变量的定义和赋值处删去即可。
+     <9.3>exec.c 746行的警告是由于编译优化选项导致，只需要将makefile中71行的的编译优化选项去掉即可。
+71 CFLAGS = -Wall -fomit-frame-pointer
+     (10)继续make
+ir.c: In function ‘ext2_readdir’:
+dir.c:215:23: error: lvalue required as left operand of assignment
+     解决方法：该错误是由于C语言过时的特性导致，只要按照现在C语言的特性改写一遍即可，如下所示。
+215                 dirent = (struct dirent*)((char*)dirent + dlen);
+     (11)继续make，出现很多警告，现在只处理错误。
+sock.c: In function ‘unix_proto_create’:
+sock.c:332:16: error: lvalue required as left operand of assignment
+sock.c: In function ‘unix_proto_release’:
+sock.c:371:16: error: lvalue required as left operand of assignment
+make[2]: *** [sock.o] Error 1
+     解决方法:sock.c 332行和371行的错误都是由于C语言的用法错误导致，更改如下：
+332     sock->data = (void*)upd;
+...
+371     sock->data = NULL;
+...
+     (12)继续make
+ip.c: In function ‘ip_compute_csum’:
+ip.c:511:3: error: can’t find a register in class ‘CREG’ while reloading ‘asm’
+ip.c:527:3: error: can’t find a register in class ‘BREG’ while reloading ‘asm’
+ip.c:536:3: error: can’t find a register in class ‘BREG’ while reloading ‘asm’
+ip.c:511:3: error: ‘asm’ operand has impossible constraints
+ip.c:527:3: error: ‘asm’ operand has impossible constraints
+ip.c:536:3: error: ‘asm’ operand has impossible constraints
+      解决方法:参考5.4
+      (13)继续make
+tcp.c:1035:10: warning: missing terminating " character [enabled by default]
+tcp.c:1035:2: error: missing terminating " character
+tcp.c:1036:6: error: expected string literal before ‘addl’
+tcp.c:1039:6: warning: missing terminating " character [enabled by default]
+tcp.c:1039:6: error: missing terminating " character
+tcp.c:1043:10: warning: missing terminating " character [enabled by default]
+tcp.c:1043:2: error: missing terminating " character
+tcp.c:1044:6: error: expected string literal before ‘movl’
+tcp.c:1047:9: error: invalid suffix "f" on integer constant
+tcp.c:1066:11: error: invalid suffix "b" on integer constant
+tcp.c:1070:9: error: invalid suffix "f" on integer constant
+tcp.c:1075:11: error: invalid suffix "b" on integer constant
+tcp.c:1079:9: error: invalid suffix "f" on integer constant
+tcp.c:1085:9: error: invalid suffix "f" on integer constant
+tcp.c:1093:6: warning: missing terminating " character [enabled by default]
+tcp.c:1093:6: error: missing terminating " character
+      解决方法：参考4和5.4
+      (14)继续make
+udp.c:159:2: error: can’t find a register in class ‘DREG’ while reloading ‘asm’
+udp.c:168:3: error: can’t find a register in class ‘CREG’ while reloading ‘asm’
+udp.c:183:2: error: can’t find a register in class ‘BREG’ while reloading ‘asm’
+udp.c:197:3: error: can’t find a register in class ‘BREG’ while reloading ‘asm’
+udp.c:211:3: error: can’t find a register in class ‘BREG’ while reloading ‘asm’
+udp.c:159:2: error: ‘asm’ operand has impossible constraints
+udp.c:168:3: error: ‘asm’ operand has impossible constraints
+udp.c:183:2: error: ‘asm’ operand has impossible constraints
+udp.c:197:3: error: ‘asm’ operand has impossible constraints
+udp.c:211:3: error: ‘asm’ operand has impossible constraints
+      解决方法：参考5.4
+     (15)继续make
+signal.c:157:4: warning: matching constraint does not allow a register [enabled by default]
+signal.c:154:3: warning: matching constraint does not allow a register [enabled by default]
+signal.c:260:1: warning: matching constraint does not allow a register [enabled by default]
+signal.c:260:1: warning: matching constraint does not allow a register [enabled by default]
+signal.c:260:1: warning: matching constraint does not allow a register [enabled by default]
+signal.c:260:1: warning: matching constraint does not allow a register [enabled by default]
+signal.c:260:1: warning: matching constraint does not allow a register [enabled by default]
+signal.c:144:16: warning: matching constraint does not allow a register [enabled by default]
+signal.c:154:3: warning: matching constraint does not allow a register [enabled by default]
+signal.c:154:3: warning: matching constraint does not allow a register [enabled by default]
+signal.c:154:3: error: inconsistent operand constraints in an ‘asm’
+    解决方法:signal.c 154行的错误是由于汇编中使用的寄存器不对造成，更改如下：
+154         __asm__("bsf %3,%1\n\t"
+155             "btrl %1,%0" 
+156             :"=&b" (current->signal),"=&a" (signr)
+157             :"0" (current->signal), "1" (signr));
+    (16)继续make，出现大量如下错误
+traps.c:311:2: error: can’t find a register in class ‘AREG’ while reloading ‘asm’
+traps.c:312:2: error: can’t find a register in class ‘AREG’ while reloading ‘asm’
+traps.c:313:2: error: can’t find a register in class ‘AREG’ while reloading ‘asm’
+traps.c:314:2: error: can’t find a register in class ‘AREG’ while reloading ‘asm’
+traps.c:315:2: error: can’t find a register in class ‘AREG’ while reloading ‘asm’
+     解决方法：将include/asm/system.h 188行改成如下：
+188     : "memory")
+    (17)继续make
+init.c: In function ‘__bad_pagetable’:
+init.c:45:2: error: can’t find a register in class ‘CREG’ while reloading ‘asm’
+init.c:45:2: error: ‘asm’ operand has impossible constraints
+     解决方法：参考5.4将arch/i386/mm/init.c文件中所有的C嵌入汇编格式都更改一遍。
+    (18)继续make，出现无数无头绪的错误。make clean一遍然后再make一次，这次make已经没有编译错误了，但是出现极其大量的链接错误下面先改一部分错误。
+…
+arch/i386/kernel/kernel.o: In function `_divide_error':
+(.text+0xfb3): undefined reference to `_do_divide_error'
+arch/i386/kernel/kernel.o: In function `error_code':
+signal.c:(.text+0xff6): undefined reference to `_current'
+arch/i386/kernel/kernel.o: In function `_coprocessor_error':
+(.text+0x100f): undefined reference to `_do_coprocessor_error'
+…
+arch/i386/kernel/kernel.o: In function `_fast_IRQ1_interrupt':
+irq.c:(.text+0x203d): undefined reference to `_cache_21'
+irq.c:(.text+0x204d): undefined reference to `_intr_count'
+irq.c:(.text+0x2054): undefined reference to `_do_fast_IRQ'
+…
+(.text+0x1c0d): undefined reference to `idt'
+arch/i386/kernel/kernel.o: In function `trap_init':
+(.text+0x1c13): undefined reference to `idt'
+arch/i386/kernel/kernel.o: In function `trap_init':
+(.text+0x1c18): undefined reference to `debug'
+…
+(.data+0x80): undefined reference to `_sys_gtty'
+arch/i386/kernel/kernel.o: In function `_sys_call_table':
+(.data+0x84): undefined reference to `_sys_access'
+…
+      解决方法：上面这些错误都是由于过时的C语言特性造成的，在linux1.2.13内核中的C语言在C函数编译成汇编的时候，函数名字前面会被编译器自动增加一个下划线，因此在汇编中调用这些C函数的时候函数名字前面都带一个下划线。现在的C编译器编译函数的时候不再在函数前面加下划线，而是保持函数名不变，因此编译时就找不到相应的函数了。更改时只需将arch/i386/kernel/head.S，arch/i386/kernel/entry.S，asm/include/irq.h文件中所有的函数和标号前面的下划线去掉即可。
+     (19)继续make
+…
+net/net.o: In function `unix_proto_connect':
+sock.c:(.text+0x21a6): undefined reference to `__stack_chk_fail'
+net/net.o: In function `unix_proto_bind':
+sock.c:(.text+0x22fd): undefined reference to `__stack_chk_fail'
+…
+arch/i386/kernel/kernel.o: In function `sys_call_table':
+(.data+0x20c): undefined reference to `sys_quotactl'
+kernel/kernel.o: In function `schedule':
+(.text+0xa27): undefined reference to `_current'
+kernel/kernel.o: In function `schedule':
+(.text+0xa34): undefined reference to `_last_task_used_math'
+…
+    解决方法：
+    <19.1> undefined reference to `__stack_chk_fail' 网上的解决方法就是在Makefile中的CFLAG中添加-fno-stack-protector，原因如下。
+     GCC likes to do a bunch of stuff behind the scenes. It's great for application programming because all of the runtime support is already there, unfortunately in OS development you have to make the runtime support yourself. Using that flag tells GCC to not to do some of that stuff behind the scenes, so you don't have to write the stuff until much later where you have an idea as to what you need and how to do it.
+     <19.2> sys_call_table中的错误是由于include/linux/sys.h中的定义函数名前面多了一个下划线，更改如下：
+30 #define sys_quotactl    sys_ni_syscall
+     <19.3> schedule函数中的两个错误与18是一样的，只要将include/asm/system.h中52行和55行中current和last_task_used_math前面的下划线去掉。
+     (20)继续make，终于编译成功。
+
+make[1]: Leaving directory `/home/zhaxia/work/linux-1.2.13/arch/i386/mm'
+ld -qmagic -Ttext 0xfffe0 arch/i386/kernel/head.o init/main.o init/version.o \
+		arch/i386/kernel/kernel.o arch/i386/mm/mm.o kernel/kernel.o mm/mm.o fs/fs.o net/net.o ipc/ipc.o \
+		fs/filesystems.a \
+		drivers/block/block.a drivers/char/char.a drivers/net/net.a \
+		/home/zhaxia/work/linux-1.2.13/lib/lib.a -o vmlinux
+ld: warning: cannot find entry symbol _start; defaulting to 00000000000fffe0
+nm vmlinux | grep -v '\(compiled\)\|\(\.o$\)\|\( a \)' | sort > System.map
+    (21)make成功之后有很多的警告，继续处理，下面处理警告不分先后次序。
+     <21.1>
+vm86.c: In function ‘set_vflags_short’:
+vm86.c:203:2: warning: dereferencing type-punned pointer will break strict-aliasing rules [-Wstrict-aliasing]
+vm86.c:203:2: warning: dereferencing type-punned pointer will break strict-aliasing rules [-Wstrict-aliasing]
+     解决方法：该问题是由于旧的C语言特性造成，只需要将arch/i386/kernel/vm86.c中的相关代码改写一遍即可，如下所示。
+…
+44 #define VFLAGS  ((unsigned short)(current->tss.v86flags))
+…
+203     unsigned short svflags = VFLAGS;
+204     set_flags(svflags, flags, current->tss.v86mask);
+205     current->tss.v86flags = (current->tss.v86flags & 0xffff0000) | svflags;
+…
+    <21.2>
+vm86.c:319:2: warning: dereferencing type-punned pointer will break strict-aliasing rules [-Wstrict-aliasing]
+vm86.c:321:2: warning: dereferencing type-punned pointer will break strict-aliasing rules [-Wstrict-aliasing]
+     解决方法：该问题是由于不同数据类型赋值导致的，只需要将arch/i386/kernel/vm86.c中38,39行数据类型改成unsigned long即可。
+38 #define IP(regs)    (*(unsigned long *)&((regs)->eip))
+39 #define SP(regs)    (*(unsigned long *)&((regs)->esp))
+    <21.3>
+tcp.c:4471:3: warning: ‘tcp_reset’ is static but used in inline function ‘tcp_sequence’ which is not static [enabled by default]
+tcp.c:4176:3: warning: ‘tcp_check_urg’ is static but used in inline function ‘tcp_urg’ which is not static [enabled by default]
+tcp.c:4105:3: warning: ‘reset_xmit_timer’ is static but used in inline function ‘tcp_data’ which is not static [enabled by default]
+    解决方法：将出现警告的函数前面的__inline__关键字删除即可。
+    <21.4>
+arp.c:561:22: warning: variable ‘tha’ set but not used [-Wunused-but-set-variable]
+    解决方法：该问题是由于定义了变量但是没有使用造成的，只需要将变量的删除即可，后面还有很多一样原因的警告，一样处理即可。
+   <21.5>
+vsprintf.c:32:2: warning: array subscript has type ‘char’ [-Wchar-subscripts]
+vsprintf.c:33:6: warning: array subscript has type ‘char’ [-Wchar-subscripts]
+    解决方法：将isxdigit()和toupper()这两个函数中的参数用int强制转换一下即可，后面还会有很多一样的问题，强制转换时只需要看看函数的定义就可以知道强制转换成什么样的类型。
+   <21.6>
+
+sys.c:135:19: warning: type defaults to ‘int’ in declaration of ‘sys_kill’ [-Wimplicit-int]
+
+    解决方法：该警告是因为函数定义与ubuntu中的定义不同造成的，只需要将kernel/sys.c 135行中的定义改成如下即可。
+
+135 extern asmlinkage long sys_kill(int, int); 
+
+    <21.7>
+
+sched.c: Assembler messages:
+
+sched.c:196: Warning: indirect ljmp without `*'
+
+     解决方法：引起该警告的具体原因我也不是很清楚，但是根据警告提示说少了一个‘＊’符号，我在include/asm/system.h的53行加上‘＊’之后这个警告就消失了。
+
+53     "ljmp *%0\n\t" \ 
+
+     <21.8>
+
+entry.S: Assembler messages:
+
+entry.S:194: Warning: indirect call without `*'
+
+     解决方法：解决方法如21.7，将arch/i386/kernel/entry.S中194行更改如下。
+
+194     call *sys_call_table(,%eax,4) 
+
+     <21.9>
+
+string.c:178:8: warning: conflicting types for built-in function ‘bcopy’ [enabled by default]
+
+     解决方法：该警告说bcopy函数与系统内置的bcopy函数定义不一致导致，bcopy函数在linux 1.2.13内核中并没有使用，将lib/string.c 178行的bcopy函数删去即可。
+
+     <21.10>
+
+binfmt_elf.c: In function ‘load_elf_binary’:
+
+binfmt_elf.c:527:7: warning: ‘elf_entry’ may be used uninitialized in this function [-Wuninitialized]
+
+binfmt_elf.c:283:12: warning: ‘interp_ex.a_bss’ may be used uninitialized in this function [-Wuninitialized]
+
+binfmt_elf.c:307:16: note: ‘interp_ex.a_bss’ was declared here
+
+binfmt_elf.c:259:50: warning: ‘interp_ex.a_data’ may be used uninitialized in this function [-Wuninitialized]
+
+binfmt_elf.c:307:16: note: ‘interp_ex.a_data’ was declared here
+
+binfmt_elf.c:259:50: warning: ‘interp_ex.a_text’ may be used uninitialized in this function [-Wuninitialized]
+
+binfmt_elf.c:307:16: note: ‘interp_ex.a_text’ was declared here
+
+binfmt_elf.c:264:28: warning: ‘interp_ex.a_info’ may be used uninitialized in this function [-Wuninitialized]
+
+binfmt_elf.c:307:16: note: ‘interp_ex.a_info’ was declared here
+
+    解决方法：该错误是因为变量interp_ex在使用之前有未被赋值的风险，解决方法为将fs/binfmt_elf.c中load_elf_binary()函数中的变量 interp_ex定义移到该函数外面的前面即可，这样在系统开机时会自动清零。
+
+     <21.11>
+
+ld: warning: cannot find entry symbol _start; defaulting to 00000000000fffe0
+
+     解决方法：该警告是因为链接的时候找不到程序入口标号_start，更改方法为将arch/i386/kernel/head.S中的startup_32标号改成_start,并且在arch/i386/kernel/head.S前面加上.globl _start语句。
+
+18 .globl _start  
+
+...
+
+33 _start:
+
+...
+
+    (22)将所有的warning解决之后，linux1.2.13编译就大功告成了。
+
+3.小结
+     Linux1.2.13的代码年份较早，导致其使用的语法有很多特性现在的GCC编译器都不支持，编译的时候需要花费比较多的精力去改正错误，在改错的过程中汇编代码出错时可以参考linux2.5.0的中的汇编代码。编译成功之后并不代表代码就能运行，还需要在后续调试的过程中继续更改那些编译导致的隐含错误。
+--------------------- 
+作者：XiaZhanglong 
+来源：CSDN 
+原文：https://blog.csdn.net/XiaZhanglong/article/details/49407897 
+版权声明：本文为博主原创文章，转载请附上博文链接！
+
+
+
+
+
+
+
+
+
+
+
+
